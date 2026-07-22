@@ -1,23 +1,18 @@
-"""
-Technical analysis layer.
-
-All functions take a pandas DataFrame with columns
-Open, High, Low, Close, Volume (indexed by datetime) and return
-plain floats/bools. No external TA library dependency (keeps
-setup simple) — everything is implemented directly with pandas.
-"""
-
 import pandas as pd
 import numpy as np
 
-from config import TECH_POINTS
-
-
 def calc_vwap(df: pd.DataFrame) -> pd.Series:
+    """Calculates Intraday VWAP reset daily at 09:15 AM."""
     typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
-    vwap = (typical_price * df["Volume"]).cumsum() / df["Volume"].cumsum()
-    return vwap
-
+    tp_v = typical_price * df["Volume"]
+    
+    df_temp = df.copy()
+    df_temp['Date'] = df_temp.index.date
+    
+    cum_tp_v = tp_v.groupby(df_temp['Date']).cumsum()
+    cum_vol = df_temp['Volume'].groupby(df_temp['Date']).cumsum()
+    
+    return cum_tp_v / cum_vol.replace(0, np.nan)
 
 def calc_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     delta = df["Close"].diff()
@@ -26,125 +21,207 @@ def calc_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     avg_gain = gain.rolling(window=period, min_periods=period).mean()
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
+    return 100 - (100 / (1 + rs))
 
 def calc_ema(df: pd.DataFrame, span: int) -> pd.Series:
     return df["Close"].ewm(span=span, adjust=False).mean()
 
-
 def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """
-    Average True Range — measures recent volatility. Used to size
-    stop-loss/target distance so they scale with how much the
-    stock is actually moving, instead of a fixed % for everything.
-    """
     high, low, close = df["High"], df["Low"], df["Close"]
     prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    atr = tr.rolling(window=period, min_periods=period).mean()
-    return atr
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    return tr.rolling(window=period, min_periods=period).mean()
 
+def calc_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculates Average Directional Index (ADX) for Trend Strength."""
+    high, low, close = df["High"], df["Low"], df["Close"]
+    plus_dm = high.diff()
+    minus_dm = low.diff().abs()
+    
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
+    
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(period).mean()
+    
+    plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(period).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(period).mean() / atr)
+    
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
+    adx = dx.rolling(period).mean()
+    return adx.fillna(0)
 
-def volume_spike(df: pd.DataFrame, lookback: int = 20, multiplier: float = 2.0) -> bool:
-    if len(df) < lookback + 1:
-        return False
-    avg_vol = df["Volume"].iloc[-(lookback + 1):-1].mean()
-    current_vol = df["Volume"].iloc[-1]
-    if avg_vol == 0 or np.isnan(avg_vol):
-        return False
-    return bool(current_vol >= multiplier * avg_vol)
-
-
-def technical_score(df: pd.DataFrame) -> dict:
+def classify_strategy(direction, bull_vwap, bear_vwap, vol_score, adx_score, bull_ema, bear_ema, nifty_aligned):
     """
-    Computes a 0-100 technical score for one stock's candle data,
-    plus a breakdown of which conditions fired (useful for the
-    dashboard / debugging / backtesting).
+    🤖 AUTO-DETECTS the basis a call was generated on — feeds directly into
+    trade_log's `strategy` column so the dashboard shows it automatically,
+    with no manual selection needed.
+
+    Uses the SAME sub-scores technical_score() already calculates, so this
+    is not a guess bolted on after the fact — it reflects what actually
+    drove the score.
+
+    Priority (most specific / strongest signal first):
+      1. BREAKOUT  — price stretched far from VWAP AND a volume spike confirms it
+      2. MOMENTUM  — strong trend strength (ADX) with expanding EMA momentum
+      3. REVERSAL  — stock moving counter to the broader NIFTY trend
+      4. SCREENER_DEFAULT — none of the above stood out; matched on general score
     """
-    if df.empty or len(df) < 25:
-        return {"score": 0, "breakdown": {}, "reason": "insufficient_data"}
+    vwap_component = bull_vwap if direction == "BUY" else bear_vwap
+    ema_component = bull_ema if direction == "BUY" else bear_ema
 
-    score = 0
-    breakdown = {}
+    if vwap_component >= 25 and vol_score >= 12:
+        return "BREAKOUT"
 
-    # --- VWAP condition ---
-    vwap = calc_vwap(df)
+    if adx_score >= 10 and ema_component >= 15:
+        return "MOMENTUM"
+
+    if not nifty_aligned:
+        return "REVERSAL"
+
+    return "SCREENER_DEFAULT"
+
+
+def technical_score(df: pd.DataFrame, nifty_trend: int = 0) -> dict:
+    """
+    Graduated Scoring System (Max 100 Confidence Points).
+    nifty_trend: +1 (Bullish), -1 (Bearish), 0 (Neutral)
+    """
+    if df.empty or len(df) < 50:
+        return {"score": 0, "direction": "NO_CALL", "strategy": "SCREENER_DEFAULT", "breakdown": {}, "reason": "insufficient_data"}
+
+    vwap = calc_vwap(df).iloc[-1]
     price = df["Close"].iloc[-1]
-    above_vwap = bool(price > vwap.iloc[-1])
-    if above_vwap:
-        score += TECH_POINTS["vwap"]
-    breakdown["above_vwap"] = above_vwap
-
-    # --- RSI condition (sweet spot 40-60, and rising) ---
-    rsi = calc_rsi(df)
-    rsi_last = rsi.iloc[-1]
-    rsi_prev = rsi.iloc[-2] if len(rsi) > 1 else rsi_last
-    rsi_ok = bool(pd.notna(rsi_last) and 40 <= rsi_last <= 60 and rsi_last >= rsi_prev)
-    if rsi_ok:
-        score += TECH_POINTS["rsi"]
-    breakdown["rsi"] = None if pd.isna(rsi_last) else round(float(rsi_last), 2)
-    breakdown["rsi_in_sweet_spot"] = rsi_ok
-
-    # --- Volume spike ---
-    vol_spike = volume_spike(df)
-    if vol_spike:
-        score += TECH_POINTS["volume_spike"]
-    breakdown["volume_spike"] = vol_spike
-
-    # --- EMA 9/21 cross (bullish = EMA9 > EMA21) ---
+    rsi = calc_rsi(df).iloc[-1]
     ema9 = calc_ema(df, 9)
     ema21 = calc_ema(df, 21)
-    bullish_cross = bool(ema9.iloc[-1] > ema21.iloc[-1])
-    if bullish_cross:
-        score += TECH_POINTS["ema_cross"]
-    breakdown["ema9_gt_ema21"] = bullish_cross
+    ema50 = calc_ema(df, 50)
+    adx = calc_adx(df).iloc[-1]
+    
+    vol_curr = df["Volume"].iloc[-1]
+    vol_prev = df["Volume"].iloc[-2]
+    vol_avg20 = df["Volume"].iloc[-21:-1].mean()
 
-    return {"score": score, "breakdown": breakdown, "reason": "ok"}
+    # --- 1. GRADUATED VWAP SCORING (Max 25 pts) ---
+    vwap_pct_diff = ((price - vwap) / vwap) * 100
+    bull_vwap, bear_vwap = 0, 0
+    if vwap_pct_diff > 0.4: bull_vwap = 25
+    elif 0 < vwap_pct_diff <= 0.4: bull_vwap = 15
+    elif -0.4 <= vwap_pct_diff < 0: bear_vwap = 15
+    elif vwap_pct_diff < -0.4: bear_vwap = 25
 
+    # --- 2. ENHANCED VOLUME SPIKE (Max 20 pts) ---
+    vol_score = 0
+    if vol_curr > (1.3 * vol_avg20) and vol_curr > vol_prev:
+        vol_score = 20
+    elif vol_curr > (1.3 * vol_avg20):
+        vol_score = 12
 
-def trade_levels(df: pd.DataFrame, direction: str = "BUY",
-                  atr_multiplier: float = 1.5, risk_reward: float = 2.0) -> dict:
-    """
-    Converts the current price + volatility into a concrete
-    Entry / Stop-Loss / Target, using an ATR-based formula:
+    # --- 3. STRICT RSI SEPARATION (Max 15 pts) ---
+    bull_rsi, bear_rsi = 0, 0
+    if pd.notna(rsi):
+        if 55 <= rsi <= 75: bull_rsi = 15
+        elif 50 <= rsi < 55: bull_rsi = 7
+        elif 25 <= rsi <= 45: bear_rsi = 15
+        elif 45 < rsi <= 50: bear_rsi = 7
 
-        BUY:   entry = last close
-               stop_loss = entry - (ATR * atr_multiplier)
-               target    = entry + (risk * risk_reward)
+    # --- 4. EMA CROSSOVER & MOMENTUM DISTANCE (Max 15 pts) ---
+    e9_curr, e21_curr = ema9.iloc[-1], ema21.iloc[-1]
+    e9_prev, e21_prev = ema9.iloc[-2], ema21.iloc[-2]
+    curr_diff = e9_curr - e21_curr
+    prev_diff = e9_prev - e21_prev
+    
+    bull_ema, bear_ema = 0, 0
+    if curr_diff > 0:
+        bull_ema = 15 if curr_diff > prev_diff else 10  # Momentum expanding
+    elif curr_diff < 0:
+        bear_ema = 15 if abs(curr_diff) > abs(prev_diff) else 10
 
-        SHORT: entry = last close
-               stop_loss = entry + (ATR * atr_multiplier)
-               target    = entry - (risk * risk_reward)
+    # --- 5. EMA 50 TREND & SLOPE (Max 15 pts) ---
+    e50_curr = ema50.iloc[-1]
+    e50_prev5 = ema50.iloc[-6] if len(ema50) >= 6 else e50_curr
+    bull_trend, bear_trend = 0, 0
+    
+    if price > e50_curr:
+        bull_trend = 15 if e50_curr > e50_prev5 else 10  # Upward slope
+    elif price < e50_curr:
+        bear_trend = 15 if e50_curr < e50_prev5 else 10  # Downward slope
 
-    This is a formula, not a prediction — it just converts "how
-    much this stock typically moves" (ATR) into a consistent
-    risk-managed entry/exit plan. atr_multiplier and risk_reward
-    are yours to tune in config.py.
-    """
+    # --- 6. ADX TREND STRENGTH (Max 10 pts) ---
+    adx_score = 10 if adx >= 25 else (5 if adx >= 20 else 0)
+
+    # --- CALCULATE TOTAL SCORES ---
+    total_bull = bull_vwap + vol_score + bull_rsi + bull_ema + bull_trend + adx_score
+    total_bear = bear_vwap + vol_score + bear_rsi + bear_ema + bear_trend + adx_score
+
+    # --- 7. MARKET TREND (NIFTY ALIGNMENT) PENALTY / BONUS ---
+    if nifty_trend == 1:
+        total_bull += 5
+        total_bear -= 10
+    elif nifty_trend == -1:
+        total_bear += 5
+        total_bull -= 10
+
+    total_bull = max(0, min(100, total_bull))
+    total_bear = max(0, min(100, total_bear))
+
+    if total_bull >= total_bear and total_bull > 0:
+        final_score = total_bull
+        direction = "BUY"
+    else:
+        final_score = total_bear
+        direction = "SHORT"
+
+    nifty_aligned = (direction == "BUY" and nifty_trend == 1) or (direction == "SHORT" and nifty_trend == -1)
+
+    breakdown = {
+        "vwap": "STRONG" if vwap_pct_diff > 0.4 else ("WEAK" if vwap_pct_diff > 0 else "BEARISH"),
+        "rsi": round(float(rsi), 1) if pd.notna(rsi) else 50,
+        "adx": round(float(adx), 1),
+        "vol_spike": vol_score > 0,
+        "nifty_aligned": nifty_aligned,
+        "direction": direction
+    }
+
+    strategy = classify_strategy(
+        direction=direction,
+        bull_vwap=bull_vwap, bear_vwap=bear_vwap,
+        vol_score=vol_score,
+        adx_score=adx_score,
+        bull_ema=bull_ema, bear_ema=bear_ema,
+        nifty_aligned=nifty_aligned,
+    )
+    breakdown["strategy"] = strategy
+
+    return {"score": final_score, "direction": direction, "strategy": strategy, "breakdown": breakdown, "reason": "ok"}
+
+def trade_levels(df: pd.DataFrame, direction: str = "BUY", risk_reward: float = 2.0) -> dict:
+    """Dynamic ATR-based SL & Target depending on Volatility %."""
     if df.empty or len(df) < 20:
-        return {"entry": None, "stop_loss": None, "target": None,
-                "risk_per_share": None, "reason": "insufficient_data"}
+        return {"entry": None, "stop_loss": None, "target": None, "reason": "insufficient_data"}
 
     atr = calc_atr(df).iloc[-1]
     entry = float(df["Close"].iloc[-1])
 
-    if pd.isna(atr) or atr <= 0:
-        return {"entry": round(entry, 2), "stop_loss": None, "target": None,
-                "risk_per_share": None, "reason": "atr_unavailable"}
+    if pd.isna(atr) or atr <= 0 or entry <= 0:
+        return {"entry": round(entry, 2), "stop_loss": None, "target": None, "reason": "atr_unavailable"}
 
-    atr = float(atr)
-    risk = atr * atr_multiplier
+    atr_pct = (atr / entry) * 100
 
+    # Dynamic ATR Multiplier logic based on volatility
+    if atr_pct < 0.8:
+        atr_multiplier = 1.0  # Low volatility
+    elif atr_pct >= 2.0:
+        atr_multiplier = 2.0  # High volatility
+    else:
+        atr_multiplier = 1.5  # Standard volatility
+
+    risk = float(atr) * atr_multiplier
     if direction == "BUY":
         stop_loss = entry - risk
         target = entry + (risk * risk_reward)
-    else:  # SHORT
+    else:
         stop_loss = entry + risk
         target = entry - (risk * risk_reward)
 
@@ -153,24 +230,6 @@ def trade_levels(df: pd.DataFrame, direction: str = "BUY",
         "stop_loss": round(stop_loss, 2),
         "target": round(target, 2),
         "risk_per_share": round(risk, 2),
-        "risk_reward": risk_reward,
+        "atr_pct": round(atr_pct, 2),
         "reason": "ok",
     }
-
-
-if __name__ == "__main__":
-    # Quick sanity check with synthetic data
-    idx = pd.date_range("2026-06-30 09:15", periods=50, freq="5min")
-    rng = np.random.default_rng(42)
-    close = 100 + np.cumsum(rng.normal(0, 0.5, 50))
-    df = pd.DataFrame({
-        "Open": close + rng.normal(0, 0.1, 50),
-        "High": close + abs(rng.normal(0, 0.3, 50)),
-        "Low": close - abs(rng.normal(0, 0.3, 50)),
-        "Close": close,
-        "Volume": rng.integers(1000, 5000, 50),
-    }, index=idx)
-    result = technical_score(df)
-    print(result)
-    print(trade_levels(df, direction="BUY"))
-    print(trade_levels(df, direction="SHORT"))

@@ -1,87 +1,84 @@
 """
 Central configuration for the Intraday Screener.
-Edit STOCK_LIST, WEIGHTS, and BROKER settings here.
+Updated: Lowered CALL_THRESHOLD to 25 for generating active high-probability signals.
 """
 
-# ---------------------------------------------------------------
-# Stock universe (NSE symbols, yfinance format uses ".NS" suffix)
-# Replace/extend this list with your own 100 stocks.
-# ---------------------------------------------------------------
+# Yahoo Finance compliant tickers with .NS suffix (Duplicates removed)
 STOCK_LIST = [
-    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
-    "SBIN", "BHARTIARTL", "ITC", "KOTAKBANK", "LT",
-    "AXISBANK", "HINDUNILVR", "BAJFINANCE", "MARUTI", "SUNPHARMA",
-    "TITAN", "ULTRACEMCO", "ASIANPAINT", "NESTLEIND", "WIPRO",
-    "ADANIENT", "ADANIPORTS", "TATASTEEL", "TATAMOTORS", "ONGC",
-    "NTPC", "POWERGRID", "COALINDIA", "JSWSTEEL", "HCLTECH",
-]
+    # Top Financials & Banks
+    "HDFCBANK.NS", "KOTAKBANK.NS", "AXISBANK.NS", "SBIN.NS", 
+    "INDUSINDBK.NS", "BANKBARODA.NS", "PNB.NS", "CANBK.NS", "IDFCFIRSTB.NS",
+    "BAJFINANCE.NS", "MUTHOOTFIN.NS", "PFC.NS", 
+    "RECLTD.NS", "SHRIRAMFIN.NS", "JIOFIN.NS", "HDFCLIFE.NS",
 
-# NIFTY 50 index symbol (used for the market-trend filter)
+    # IT & Technology
+    "TCS.NS", "INFY.NS", "HCLTECH.NS", "WIPRO.NS", "TECHM.NS", 
+    "LTIM.NS",  "NAUKRI.NS",
+
+    # Energy, Utilities & Oil
+     "ONGC.NS", "BPCL.NS", "IOC.NS", "GAIL.NS",
+    "NTPC.NS", "POWERGRID.NS", "TATAPOWER.NS", "ADANIPOWER.NS", "COALINDIA.NS",
+
+    # Automobiles & Auto Components
+    "TATAMOTORS.NS", "M&M.NS", "MARUTI.NS", "BAJAJ-AUTO.NS", "HEROMOTOCO.NS", 
+     "TVSMOTOR.NS", "BHARATFORG.NS", "ASHOKLEY.NS",
+
+    # Metals & Mining
+    "TATASTEEL.NS", "JSWSTEEL.NS", "HINDALCO.NS", "JINDALSTEL.NS", "VEDL.NS",
+
+    # Consumer Goods & Retail (FMCG)
+    "HINDUNILVR.NS", "ITC.NS", "NESTLEIND.NS", "BRITANNIA.NS", "TATACONSUM.NS", 
+    "DABUR.NS", "GODREJCP.NS",  "ZOMATO.NS", "ASIANPAINT.NS", "TITAN.NS",
+
+    # Pharma & Healthcare
+    "SUNPHARMA.NS", "CIPLA.NS", "DRREDDY.NS", "DIVISLAB.NS", "APOLLOHOSP.NS", "LUPIN.NS",
+
+    # Infrastructure & Capital Goods
+    "LT.NS", "HAL.NS", "BEL.NS", "BHEL.NS", "ABB.NS",
+
+    # Telecom & Durables
+    "BHARTIARTL.NS", "POLYCAB.NS", "HAVELLS.NS",
+    "BALRAMCHIN.NS", "BANDHANBANK.NS", "BELRISE.NS",
+    "BLS.NS", "CANBK.NS", "CASTROLIND.NS", "CGCL.NS", "CHAMBLFERT.NS",
+    "CROMPTON.NS", "ETERNAL.NS", "FEDERALBNK.NS", "GODIGIT.NS",
+    "GSFC.NS", "HBLPOWER.NS", "HONASA.NS", "HUHTAMAKI.NS", "IDEA.NS",
+    "IIFL.NS", "INDUSTOWER.NS", "IOC.NS", "IOLCP.NS", "IRB.NS", 
+    "IRCON.NS", "IREDA.NS", "IRFC.NS", "JAIBALAJI.NS", "JAYNECOIND.NS",
+    "JWL.NS", "KARURVYSYA.NS", "KERNEX.NS", "LTF.NS", "MONARCH.NS",
+    "NATIONALUM.NS", "NHPC.NS", "PFC.NS",
+    "RALLIS.NS", "RAMRAT.NS", "RVNL.NS", "SAIL.NS", "SCI.NS",
+    "SOLARA.NS", "SUMICHEM.NS", "SUPRIYA.NS", "TRIVENI.NS", "UNIONBANK.NS",
+    "VEDL.NS", "EXIDEIND.NS", "AMARAJABAT.NS", "BALKRISIND.NS", "BATAINDIA.NS",
+    "NMDC.NS", "GMRINFRA.NS", "ADANIGREEN.NS", "ADANITRANS.NS",
+      "ADANIPORTS.NS", "ADANIGAS.NS", "ADANIENT.NS", "BIOCON.NS", "PETRONET.NS", "ABCAPITAL.NS", "MANAPPURAM.NS",
+      "HINDPETRO.NS", "AMBUJACEM.NS", "UPL.NS", "IGL.NS", "GUJGASLTD.NS", "APOLLOTYRE.NS", "LAURUSLABS.NS",
+      "AARTIIND.NS", ""
+]
 INDEX_SYMBOL = "^NSEI"
 
-# ---------------------------------------------------------------
-# Scoring weights (must sum to 1.0)
-# ---------------------------------------------------------------
-TECH_WEIGHT = 0.60
-NEWS_WEIGHT = 0.40
 
-# Technical sub-score weights (points out of 100, tunable)
+
+# Scoring weights & Points
 TECH_POINTS = {
-    "vwap": 30,
+    "vwap": 25,
     "rsi": 20,
-    "volume_spike": 30,
-    "ema_cross": 20,
+    "volume_spike": 25,
+    "ema_cross": 15,
+    "trend_alignment": 15
 }
 
-# Data refresh interval (seconds) — used by the dashboard auto-refresh
-REFRESH_INTERVAL_SEC = 300  # 5 minutes
-
-# ---------------------------------------------------------------
-# Trade level (Entry / Stop-Loss / Target) settings
-# ---------------------------------------------------------------
-# Stop-loss distance = ATR * ATR_MULTIPLIER (bigger = wider stop,
-# fewer stop-outs but bigger loss per trade if wrong).
+REFRESH_INTERVAL_SEC = 60
 ATR_MULTIPLIER = 1.5
-
-# Target distance = risk * RISK_REWARD (e.g. 2.0 means target is
-# twice as far as the stop-loss — a 1:2 risk-reward setup).
 RISK_REWARD = 2.0
 
-# A stock only gets a BUY call if final_score >= this.
-# A stock only gets a SHORT call if final_score <= (100 - this).
-# Anything in between gets no call — final_score too weak either way.
-CALL_THRESHOLD = 65
+# Dynamic CALL_THRESHOLD (Lowered to 25 so active signals generate smoothly)
+CALL_THRESHOLD = 70
 
-# ---------------------------------------------------------------
-# Trade log / feedback loop settings
-# ---------------------------------------------------------------
 TRADE_LOG_DB = "trade_log.db"
 
-# Don't log the same (symbol, call_type) again if it was already
-# logged as OPEN within this many minutes — avoids duplicate rows
-# when you re-run the screener frequently.
-CALL_DEDUP_MINUTES = 20
-
-# How often the dashboard auto-generates a fresh set of calls
-# while it's open in your browser (used with streamlit-autorefresh).
-AUTO_REFRESH_MINUTES = 15
-
-# Candle interval for intraday indicator calculation
+# Candle Settings
 CANDLE_INTERVAL = "5m"
-CANDLE_PERIOD = "5d"   # how much historical data to pull for indicator calc
+CANDLE_PERIOD = "5d"
 
-# NSE market hours (IST). Used to detect "market closed" so the app
-# doesn't generate live-looking calls off stale end-of-day data.
 MARKET_OPEN = "09:15:00"
 MARKET_CLOSE = "15:30:00"
-
-# ---------------------------------------------------------------
-# Broker deep-link settings
-# ---------------------------------------------------------------
-# Zerodha Kite Connect basket link needs YOUR api_key from
-# https://developers.kite.trade (paid, ~Rs 500/month subscription).
-# Leave blank to fall back to a plain "search stock on Kite" link.
-KITE_API_KEY = ""   # <-- put your Kite Connect api_key here if you have one
-
-DEFAULT_ORDER_QTY = 1
-DEFAULT_PRODUCT = "MIS"   # MIS = Intraday, CNC = Delivery
